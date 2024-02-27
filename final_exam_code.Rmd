@@ -1,0 +1,246 @@
+---
+title: "Final Exam"
+output: html_document
+date: "2023-04-19"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+Loading all required libraries needed for this R code to run.
+```{r}
+library(tidyverse)
+library(caret)
+library(rpart)
+library(Metrics)
+library(randomForest)
+library(DescTools)
+library(RANN)
+library(ggplot2)
+library(randomForest)
+library(Boruta)
+library(pROC)
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(caretEnsemble)
+library(mlbench)
+library(kernlab)
+```
+
+
+Loading the dataset that will be used to build the model, and removing and missing values
+```{r}
+websites.df <- read.csv("websites_labelled.csv")
+
+websites_updated <- websites.df %>% drop_na()
+```
+
+
+Viewing the data summary and structure of the dataset
+```{r}
+print(summary(websites_updated))
+print(str(websites_updated))
+```
+
+Changing some data types to factors and printing out the data structure to see if it changed
+```{r}
+
+websites_updated <- websites_updated%>%
+  mutate(https = as.factor(https),
+         registered_domain = as.factor(registered_domain),
+         website_domain = as.factor(website_domain),
+         server_loc = as.factor(server_loc),
+         most_visitors_loc = as.factor(most_visitors_loc),
+         label = as.factor(label))
+
+
+print(str(websites_updated))
+```
+
+This section is dedicated to making visualizations to get some insights to the data
+```{r}
+plot1 <- websites_updated %>%
+  ggplot(aes(x = label)) + 
+  geom_bar() + 
+  theme_minimal()
+
+plot1
+```
+
+Scatter plot of data for number of unique users per day vs. frequency of occurrence each user colored by the label e.g. (good or bad)
+```{r}
+plot2 <- websites_updated %>%
+  ggplot(aes(x = website_exist_time, y = unique_users_day, fill = label)) + 
+  geom_point()  +
+  xlab ("Frequency of Each User") +
+  ylab("Number of Unique Users") +
+
+  ggtitle("Number of Unique Users per Day vs. Frequency of Occurance Each User") + 
+  theme_minimal()
+
+
+plot2
+```
+Bar plot for the number of unique Users per day per region (label = bad)
+```{r}
+users_day_sub <- websites_updated %>%
+  group_by(unique_users_day) %>%
+  filter(label == "bad")
+
+
+
+
+plot2 <- users_day_sub %>%
+  ggplot(aes(y=most_visitors_loc, x=unique_users_day, col=label))+ 
+  geom_area()+
+  xlab("Number of Unique Users")+
+  ggtitle("Number of Unique Users per Day per Region")+ 
+  theme_minimal()
+
+plot2
+```
+
+```{r}
+temporary_data <- websites_updated %>%
+  filter(label == "bad") %>%
+  summarize(summary(unique_users_day)) 
+```
+
+Visualizing data
+```{r}
+plt <- websites_updated %>%
+  ggplot(aes(x = url_len, col = label)) + 
+  geom_line(stat="count") +
+  xlab("Number of Characters in the URL") +
+  ylab ("Frequency of Each Length") +
+  ggtitle("URL Character Length and Frequency of Occurance") + 
+ theme(
+    plot.title = element_text(colour="#9336cc", size=16, face="bold.italic"),
+    axis.title.x = element_text(colour="#9336cc", size=10, face="bold"),
+    axis.title.y = element_text(colour="#9336cc", size=10, face="bold"))
+
+plt
+```
+
+Splitting the data 75/25 to be used as training/test with a seed to ensure reproducibility
+```{r}
+indx <- sample(nrow(websites_updated) ,nrow(websites_updated) * 0.25) ## Creating an index to split on
+
+train.df <- websites_updated[indx, ]
+test.df <- websites_updated[-indx, ]  
+```
+
+Upsample the minor class i.e. "bad" to balance the data
+```{r}
+train.df.modified <- upSample(x=train.df %>% select(-label),
+                  y=train.df$label,
+                  yname = "label")
+
+```
+
+
+Binning the js_len variable into two bins and then converting the columns to a factor
+```{r}
+train.df.modified <- train.df.modified %>% 
+  mutate(js_length_binned = case_when(js_len <= 335 ~ "1.bin",
+                              js_len > 335 ~ "2.bin"))
+
+test.df <- test.df %>%  
+  mutate(js_length_binned = case_when(js_len <= 335 ~ "1.bin",  
+                              js_len > 335 ~ "2.bin"))
+
+
+train.df.modified$js_length_binned <- as.factor(train.df.modified$js_length_binned)
+test.df$js_length_binned <- as.factor(test.df$js_length_binned)
+
+
+str(train.df.modified)
+```
+
+Separating the IP Address into separate columns using "." as the separator. Then I change the columns to a factor
+```{r}
+train.df.modified <- separate(train.df.modified, ip_add, into = c("ip_1", "ip_2", 
+                                                "ip_3", 
+                                                "ip_4"), sep = "\\.")
+
+test.df <- separate(test.df, ip_add, into = c("ip_1", 
+                                                      "ip_2", 
+                                                      "ip_3", 
+                                                      "ip_4"), sep = "\\.")
+
+
+
+train.df.modified <- train.df.modified %>%
+  mutate(ip_1 = as.numeric(ip_1),
+         ip_2 = as.numeric(ip_2),
+         ip_3 = as.numeric(ip_3),
+         ip_4 = as.numeric(ip_4))
+
+test.df <- test.df %>%
+  mutate(ip_1 = as.numeric(ip_1),
+         ip_2 = as.numeric(ip_2),
+         ip_3 = as.numeric(ip_3),
+         ip_4 = as.numeric(ip_4)) 
+```
+
+Performing a filter-based variable importance and then selecting the top 5 most important features in our train.df.modified dataset and test.df
+```{r}
+filter.selection <- filterVarImp(x = train.df.modified %>% select(-label), y = train.df.modified$label)
+
+filter.sorted <- data.frame(cbind(variable = rownames(filter.selection),
+                                  score = filter.selection[,1])) %>%
+  arrange(desc(score))
+
+train.df.modified <- train.df.modified %>%
+  select(filter.sorted$variable[1:6],
+         label)
+
+test.df <- test.df %>%
+  select(filter.sorted$variable[1:6],
+         label)
+```
+
+
+Building a random forest model with tuned hyperparameters using the randomForest package within caret, and using 3-fold cross validation
+
+```{r}
+grid <-  expand.grid(mtry = c(3,4,5,6),
+                     splitrule = c("gini", "extratrees", "hellinger"),
+                     min.node.size = c(1, 2, 3))
+
+fitControl <- trainControl(method = "CV",
+                           number = 5)
+
+model = train(label ~.,
+              data = train.df.modified,
+  method = 'ranger',
+  tuneGrid = grid,
+  trControl = fitControl
+)
+
+```
+
+Building the final random forest model with optimal hyperparameters found in the step above
+```{r}
+grid <-  expand.grid(mtry = 3,
+                     splitrule = "gini",
+                     min.node.size = 2)
+
+
+model = train(label ~.,
+              data = train.df.modified,
+              method = 'ranger',
+              tuneGrid = grid,
+              trControl = fitControl
+)
+```
+
+Using the final model to predict on the test.df to get a representation of how good our model is focusing on displaying the recall score.
+```{r}
+prediction <- predict(model, test.df)
+
+confusionMatrix(prediction, test.df$label)
+```
